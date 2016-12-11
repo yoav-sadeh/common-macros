@@ -4,17 +4,35 @@ import com.hamlazot.common.serialization.JsonSerializer
 import org.json4s.Formats
 import scala.language.experimental.macros
 
-
 object Macros {
 
+  var log: Boolean = false
+  implicit def activateLog:Boolean = {
+    Macros.log = true
+    true
+  }
   import scala.reflect.macros.whitebox.Context
 
   object Mapper {
+    var logFlag: Boolean = false
+    var logRawFlag: Boolean = false
+
     implicit def materializeMappable[T]: Mapper[T] =
     macro materializeMappableImpl[T]
 
     def materializeMappableImpl[T: c.WeakTypeTag](c: Context): c.Expr[Mapper[T]] = {
       import c.universe._
+
+      def log(msg: Any): Unit = {
+
+        if (logFlag){ //Configuration.logResults) {
+          println(msg)
+        }
+        if (logRawFlag){ //(Configuration.logRawResults) {
+          println(showRaw(msg))
+        }
+      }
+
       val tpe = weakTypeOf[T]
       val pred = tpe.asInstanceOf[scala.reflect.internal.Types#ClassTypeRef]
       val infoList = pred.pre.typeSymbol.info.members.toList
@@ -46,6 +64,9 @@ object Macros {
       }
     """
       }
+
+      c.info(c.enclosingPosition, s"Mapper[$tpe]: ${result.toString}", true)
+      c.info(c.enclosingPosition, s"Mapper[$tpe]: ${showRaw(result)}", true)
       result
     }
 
@@ -75,6 +96,18 @@ object Macros {
         resultType
       }
 
+      def getFQTypeName[T: c.WeakTypeTag](field: c.universe.Symbol): String = {
+        val theType = field.info.typeSymbol
+        val fqTypeName = if (field.info.resultType.typeSymbol.isAbstract) {
+          val info = infoList.find(m => m.nameString == field.info.resultType.typeSymbol.name.toString).get.info
+
+          info.typeSymbol.fullName
+        } else {
+          theType.fullName
+        }
+        fqTypeName
+      }
+
       def getTypeArgs[T: c.WeakTypeTag](field: c.universe.Symbol): List[TypeName] = {
         if (field.info.resultType.typeSymbol.isAbstract) {
           val info = infoList.find(m => m.nameString == field.info.resultType.typeSymbol.name.toString).get
@@ -88,7 +121,7 @@ object Macros {
         if (field.info.resultType.typeSymbol.isAbstract) {
           val info = infoList.find(m => m.nameString == field.info.resultType.typeSymbol.name.toString).get.info
           info.typeConstructor.takesTypeArgs
-        }else {
+        } else {
           field.info.resultType.takesTypeArgs
         }
       }
@@ -118,6 +151,12 @@ object Macros {
         )
       }
 
+      def isSamePackage: (String) => Boolean = { f =>
+        val tpeString =tpe.typeSymbol.fullName.split('.').dropRight(1).mkString(".")
+        val fieldString = f.split('.').dropRight(1).mkString(".")
+        c.info(c.enclosingPosition, s"Serializer[$tpe]: isSamePackage - field: $fieldString, tpe: $tpeString", true)
+        tpeString.contains(fieldString)
+      }
       try {
 
         val ctor = tpe.decls.collectFirst {
@@ -126,25 +165,51 @@ object Macros {
 
         val fields = ctor.paramLists.flatten
 
+
+        val fqdnSegments = fields.map(field => getFQTypeName(field)).filterNot(isSamePackage).map({ fqdn =>
+          c.info(c.enclosingPosition, s"Serializer[$tpe]: fqdn - $fqdn", true)
+          val segments = fqdn.split('.').map(TermName(_))
+          val segmentsNoType = segments.dropRight(1)
+          val quali = Select(Ident(segmentsNoType(0)), segmentsNoType(1))
+          val select = if(segmentsNoType.size > 2){
+            segmentsNoType.drop(3).foldLeft[Select](Select(quali, segmentsNoType(2)))((a1,a2) => Select(a1,a2))
+          } else{
+            quali
+          }
+          val importExpr = Import(select, List(ImportSelector(segments.last, -1, segments.last, -1)))
+          c.info(c.enclosingPosition, s"Serializer[$tpe]: import - $importExpr", true)
+          importExpr
+
+
+        })
+
+        c.info(c.enclosingPosition, s"Serializer[$tpe]: ${fqdnSegments}", true)
+
         val extractors = fields.view.zipWithIndex map { case (field: Symbol, i: Int) =>
           val name = field.asTerm.name
           val typeName = field.info.typeSymbol.asType.name
           val mapKey: String = name.decodedName.toString
           val realTypeName = getTypeName(field)
 
-          if(isGeneric(field)){
+          if (isGeneric(field)) {
             genericTemplate(i, realTypeName, getTypeArgs(field))
-          }else{
+          } else {
             nonGenericTemplate(i, realTypeName)
           }
 
         } toList
 
-        val deserializeExpr = Apply(Select(Ident(TermName(surrogate.pre.typeSymbol.name.toString)), TermName(tpe.typeSymbol.asClass.name.toString)),
+        c.info(c.enclosingPosition, s"Serializer[$tpe] isDeclarator a val:${surrogate.pre.termSymbol.isValue}", true)
+        val declaratorName = if(surrogate.pre.termSymbol.isValue) surrogate.pre.termSymbol.name.toString else surrogate.pre.typeSymbol.name.toString
+        c.info(c.enclosingPosition, s"Serializer[$tpe] declaratorName:$declaratorName", true)
+        val deserializeExpr = Apply(Select(Ident(TermName(declaratorName)), TermName(tpe.typeSymbol.asClass.name.toString)),
           extractors)
+
 
         val result = c.Expr[Serializer[T]] { q"""
       new Serializer[$tpe] {
+        ..$fqdnSegments
+
         def deserializ(jsonStr: String): $tpe = {
         val json = parse(jsonStr).asInstanceOf[JObject].children
 
@@ -155,33 +220,19 @@ object Macros {
     """
         }
 
-        //println(showRaw(deserializeExpr))
+        c.info(c.enclosingPosition, s"Serializer[$tpe]: ${result.toString}", true)
+        c.info(c.enclosingPosition, s"Serializer[$tpe]: ${showRaw(result)}", true)
         result
 
       } catch {
         case any: Throwable =>
-          println(s"excepzione: $any")
-          null
+          c.info(c.enclosingPosition,s"excepzione: $any", true)
+          throw any
       }
-
 
     }
 
   }
-
-//  object TypePath {
-//    implicit def isInnerClass[T]: Boolean = macro isInnerClassImpl[T]
-//
-//    def isInnerClassImpl[T: c.WeakTypeTag](c: Context): c.Expr[Boolean] = {
-//      import c.universe._
-//      val tpe = weakTypeOf[T]
-//
-//      val inner = tpe.typeSymbol.info.termSymbol.isModule
-//      //println(s"info: ${tpe.typeSymbol}")
-//      //println(s"inner: $inner")
-//      c.Expr[Boolean] { q"""$inner"""}
-//    }
-//  }
 
   trait Mapper[T] {
     def toMap(t: T): Map[String, Any]

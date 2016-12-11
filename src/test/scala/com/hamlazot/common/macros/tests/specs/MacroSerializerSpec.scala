@@ -1,14 +1,17 @@
 package com.hamlazot.common.macros.tests.specs
 
+
 import java.util.UUID
 
 import com.hamlazot.common.macros.Macros.{Mapper, Serializer}
 import com.hamlazot.common.macros.serialization.MacroSerializer
-import com.hamlazot.common.macros.tests.mocks.CaseClassWithInt
+import com.hamlazot.common.macros.tests.mocks.{ConcreteMockService, CaseClassWithInt}
 import com.hamlazot.common.serialization.{SnakecaseTransformerUUIDSupport, CamelcaseDeseiralizationTransformer, SnakecaseSerializationTransformer, JsonSerializer}
 import com.hamlazot.common.tests.mocks.NestingTrait
 import org.json4s.{JsonAST, JField, JValue, JObject}
 import org.specs2.mutable.Specification
+
+import scala.util.Try
 
 
 /**
@@ -19,6 +22,9 @@ class MacroSerializerSpec
   with MacroSerializer
   with SnakecaseTransformerUUIDSupport
   with CamelcaseDeseiralizationTransformer{
+
+  import com.hamlazot.common.macros.Macros._
+  implicitly[Boolean]
 
 
   "Serializer macro " should {
@@ -116,11 +122,34 @@ class MacroSerializerSpec
 
       serialized.replace(" ", "") shouldEqual s"""{"str":"Jojo","i":35,"trustees":{\"${id.toString}\":4}}"""
 
+
+      new Serializer[impl.NestedCaseClassWithShitInIt] {
+
+        import java.lang.String;
+        import scala.math.BigInt;
+        import scala.collection.immutable.Map;
+        def deserializ(jsonStr: String): impl.NestedCaseClassWithShitInIt = {
+          val json = parse(jsonStr).asInstanceOf[JObject].children;
+          val result = impl.NestedCaseClassWithShitInIt(json(0).camelizeKeys.extract[String], json(1).camelizeKeys.extract[BigInt], json(2).camelizeKeys.extract[Map[UUID, Int]]);
+          result
+        }
+      }
+
+
       val deserialized = marshal[impl.NestedCaseClassWithShitInIt](serialized)
 
       deserialized shouldEqual nestedCaseClass
     }
 
+    "get implicit Serializer for service protocol instances" in{
+      implicit val mockService: Option[ConcreteMockService] = makeCompileTimeType[ConcreteMockService]
+
+      Try{
+      val shmockService = mockService.get
+      implicitly[Serializer[shmockService.CreateMockRequest]]
+      }
+      true
+    }
 
     "deserialize nested case classes with abstract nested case class in a generic manner" in {
       object impl extends NestingTrait {
@@ -131,14 +160,22 @@ class MacroSerializerSpec
       impl.NestedCaseClassWithShitInIt.unapply(nestedCaseClass)
       val serialized = serialize(impl.NestedCaseClassWithShitInIt.unapply(nestedCaseClass))
       val json = parse(serialized).asInstanceOf[JObject].children
-      implicit val serializer: Serializer[impl.NestedCaseClassWithShitInIt] = make[Serializer[impl.NestedCaseClassWithShitInIt]]
+      implicit val serializer: Serializer[impl.NestedCaseClassWithShitInIt] = makeCompileTimeType[Serializer[impl.NestedCaseClassWithShitInIt]].get
       val nested = marshal[impl.NestedCaseClassWithShitInIt](serialized)
       nested shouldEqual nestedCaseClass
     }.pendingUntilFixed("issue123")
   }
 
-  def make[A]: A = ???
+  def makeCompileTimeType[A]: Option[A] = None
 }
 
+trait CompileTimeSpec{
 
+  import com.hamlazot.common.macros.Macros.Serializer
+  val service: ConcreteMockService = ???
 
+  val someFunc = {
+    implicit val serializer = implicitly[Serializer[service.CreateMockRequest]]
+
+  }
+}
